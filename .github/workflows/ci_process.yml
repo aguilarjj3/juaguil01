@@ -1,0 +1,223 @@
+name: CI Pipeline - Generic App
+ 
+on:
+  push:
+    branches:
+      - main
+      - 'feature/reusable*'
+      #- 'feature/*' (This will be enabled once, all the testing is done and env is stable to avoid multiple runs in a day)
+ 
+  pull_request:
+    branches:
+      - main
+      # - 'feature/*' (This will be enabled once, all the testing is done and env is stable to avoid multiple runs in a day)
+ 
+  workflow_dispatch:
+ 
+concurrency:
+  group: generic-app-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+ 
+env:
+  PROJECT_NAME: GenericApp
+ 
+jobs:
+  # --------------------------------------------------
+  # INITIALIZE
+  # --------------------------------------------------
+  prepare:
+    name: Resolve Version
+    uses: ../.github/workflows/prepare-version.yml@v2.4.0
+ 
+  # --------------------------------------------------
+  # BUILD
+  # --------------------------------------------------
+  build:
+    name: Maven Build & Unit Test
+    needs: prepare
+ 
+    uses: ../.github/workflows/maven-build-tests.yml@v2.4.0
+ 
+    with:
+      java-version: "25"
+      skip-tests: false
+ 
+    secrets:
+      JFROG_USERNAME: ${{ secrets.JFROG_USERNAME }}
+      JFROG_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
+ 
+  # --------------------------------------------------
+  # SONARQUBE
+  # --------------------------------------------------
+  sonarqube:
+    name: SonarQube Analysis
+    needs: build
+ 
+    uses: ../.github/workflows/sonarqube.yml@v2.4.0
+ 
+    with:
+      java-version: "25"
+      project-key: abcdefgh
+      project-name: generic-app
+      fail-on-quality-gate: false # false = skip quality gate; true = fail pipeline if vulnerabilities are found. Must be true before UAT and Prod.
+ 
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      JFROG_USERNAME: ${{ secrets.JFROG_USERNAME }}
+      JFROG_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
+ 
+  # --------------------------------------------------
+  # PUBLISH
+  # --------------------------------------------------
+  publish:
+    name: Publish Maven Artifact
+ 
+    needs:
+      - prepare
+      - build
+      - sonarqube
+ 
+    uses: ../.github/workflows/publish-jfrog.yml@v2.4.0
+ 
+    with:
+      java-version: "25"
+      artifact-id: "generic-app"
+      artifact-version: ${{ needs.prepare.outputs.version }}
+ 
+    secrets:
+      JFROG_USERNAME: ${{ secrets.JFROG_USERNAME }}
+      JFROG_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
+ 
+  # --------------------------------------------------
+  # DOCKER
+  # --------------------------------------------------
+  docker:
+    name: Docker Build & Push
+ 
+    needs:
+      - publish
+      - prepare
+ 
+    uses: ../.github/workflows/docker-build.yml@v2.4.0
+ 
+    with:
+      artifact-id: "generic-app"
+      artifact-version: ${{ needs.prepare.outputs.version }}
+ 
+      snapshot-version: ${{ needs.publish.outputs.snapshot_version || needs.prepare.outputs.version }}
+ 
+      docker-context: "."
+      docker-image: "generic-app"
+ 
+      deploy-environment: ${{ github.ref_name == 'main' && 'production' || 'development' }}
+ 
+    secrets:
+      JFROG_USERNAME: ${{ secrets.JFROG_USERNAME }}
+      JFROG_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
+ 
+  # --------------------------------------------------
+  # CXONE MULTI SCAN with quality gate
+  # --------------------------------------------------
+  cxone-security-quality-gate:
+    name: CxOne Security Scan (SAST, SCA)
+ 
+    needs:
+      - docker
+ 
+    uses: ../.github/workflows/cxone-multiscan.yml@v2.4.0
+ 
+    with:
+      project-name: project-name
+      scid: "19488"
+      scan-types: "sast,sca"
+      image-registry: sdocker-dev.docker.dev
+      image-uri: >
+        sdocker-dev.docker.dev/generic-app:${{ needs.docker.outputs.image-tag }}
+      exclude-paths: "test"
+      fail-on-quality-gate: false # false = skip quality gate; true = fail pipeline if vulnerabilities are found. Must be true before UAT and Prod.
+ 
+    secrets:
+      CXONE_CLIENT_ID: ${{ secrets.CXONE_CLIENT_ID }}
+      CXONE_CLIENT_SECRET: ${{ secrets.CXONE_CLIENT_SECRET }}
+      JFROG_USERNAME: ${{ secrets.JFROG_USERNAME }}
+      JFROG_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
+ 
+  # --------------------------------------------------
+  # CXONE MULTI SCAN without quality gate
+  # --------------------------------------------------
+  cxone-container-security:
+    name: CxOne Container Scan (Report Only)
+ 
+    needs:
+      - docker
+      - cxone-security-quality-gate
+ 
+    uses: ../.github/workflows/cxone-multiscan.yml@v2.4.0
+ 
+    with:
+      project-name: project-name
+      scid: "19488"
+      scan-types: "container-security"
+      image-registry: sdocker-dev.docker.dev
+      image-uri: >
+        sdocker-dev.docker.dev/generic-app:${{ needs.docker.outputs.image-tag }}
+      exclude-paths: "test"
+      fail-on-quality-gate: false
+ 
+    secrets:
+      CXONE_CLIENT_ID: ${{ secrets.CXONE_CLIENT_ID }}
+      CXONE_CLIENT_SECRET: ${{ secrets.CXONE_CLIENT_SECRET }}
+      JFROG_USERNAME: ${{ secrets.JFROG_USERNAME }}
+      JFROG_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
+ 
+  # --------------------------------------------------
+  # SIGN CONTAINER
+  # --------------------------------------------------
+  sign:
+    name: Sign Container Image
+ 
+    needs:
+      - docker
+      - prepare
+      - cxone-container-security
+ 
+    uses: ../.github/workflows/container-signing.yml@v2.4.0
+ 
+    with:
+      image-uri: sdocker-dev.docker.dev/generic-app:${{ needs.docker.outputs.image-tag }}
+ 
+    secrets:
+      JFROG_USERNAME: ${{ secrets.JFROG_USERNAME }}
+      JFROG_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
+      SIGNUM_CLIENT_ID: ${{ secrets.SIGNUM_CLIENT_ID }}
+      SIGNUM_CLIENT_SECRET: ${{ secrets.SIGNUM_CLIENT_SECRET }}
+ 
+  # --------------------------------------------------
+  # HELM
+  # --------------------------------------------------
+  helm:
+    name: Publish Helm Chart
+ 
+    needs:
+      - docker
+      - sign
+      - prepare
+ 
+    if: ${{ github.event_name != 'pull_request' }}
+ 
+    uses: ../.github/workflows/helm-publish.yml@v2.4.0
+ 
+    with:
+      chart-dir: "charts/generic-app"
+      base-chart-version: ${{ needs.prepare.outputs.version }}
+      chart-repo-url: "https://artifactory.dev/artifactory/helm-snapshot-local"
+      helm-target-folder: "generic-app"
+      docker-image: "generic-app"
+      artifact-version: ${{ needs.prepare.outputs.version }}
+      docker-image-tag: ${{ needs.docker.outputs.image-tag }}
+
+ 
+    secrets:
+      JFROG_USERNAME: ${{ secrets.JFROG_USERNAME }}
+      JFROG_PASSWORD: ${{ secrets.JFROG_PASSWORD }}
