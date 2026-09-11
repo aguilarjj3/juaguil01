@@ -2,8 +2,34 @@
 
 ## Repository scope
 
-- This repository is currently a CI/CD orchestration template for a generic Java application.
-- Treat [`.github/workflows/ci_process.yml`](workflows/ci_process.yml) as the authoritative source for build settings, delivery stages, job dependencies, artifact and image coordinates, security scans, and deployment behavior.
+- This repository contains two intentionally separate concerns:
+  - A dependency-free Node.js 24 HTTP API in `src/`, with tests in `test/`.
+  - A generic Java application delivery template in `.github/workflows/ci_process.yml`.
+- Treat `package.json` and `.github/workflows/node-ci.yml` as authoritative for Node.js application validation.
+- Treat [`.github/workflows/ci_process.yml`](workflows/ci_process.yml) as authoritative for Java build settings, delivery stages, job dependencies, artifact and image coordinates, security scans, and deployment behavior.
+
+## Node.js development
+
+- Use Node.js 24 or later and install dependencies with `npm ci` when a lockfile is present.
+- Run linting with `npm run lint`.
+- Run the full test suite with `npm test`; run it with coverage using `npm run test:coverage`.
+- Run a single test file with `node --test test/app.test.js` or `node --test test/config.test.js`.
+- Run a test selected by name with `node --test --test-name-pattern="<pattern>"`.
+- The application uses ES modules and Node's built-in HTTP and test modules. Do not add a web framework or test framework unless the task requires capabilities the built-in modules cannot reasonably provide.
+
+## Node.js architecture
+
+- `src/app.js` constructs and returns the HTTP server without binding a port. Keep it independently startable on an ephemeral port in tests.
+- `src/server.js` is the process entry point and owns configuration loading, listening, startup logging, and startup error handling.
+- `src/config.js` owns environment parsing and validation. Keep configuration helpers pure and independently testable.
+- API responses are JSON. Preserve the existing `{ "status": "ok" }`, `{ "error": "not_found" }`, and `{ "error": "method_not_allowed" }` response contracts unless an API change is intentional and covered by tests.
+
+## Workflow boundaries
+
+- `.github/workflows/node-ci.yml` validates the Node.js application with deterministic installation, linting, and coverage tests.
+- Do not route Node.js validation through the Maven-based jobs in `ci_process.yml`.
+- Do not convert, remove, or restructure the Java delivery workflow while changing the Node.js application unless the task explicitly requests a delivery-pipeline migration.
+- When changing branch triggers shared by both workflows, keep their intended push and pull-request coverage aligned unless the task requires different behavior.
 
 ## CI/CD architecture
 
